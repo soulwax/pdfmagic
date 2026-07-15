@@ -41,10 +41,10 @@ def test_cli_custom_threshold_flag_is_applied(synthetic_pdf_path, tmp_path):
         assert len(pdf.pages[0].rects) == 1
 
 
-def test_cli_warns_but_succeeds_on_blank_page(background_only_pdf_path, tmp_path, capsys):
+def test_cli_warns_but_succeeds_on_unimproved_page(background_only_pdf_path, tmp_path, capsys):
     output_path = str(tmp_path / "output.pdf")
     exit_code = main([background_only_pdf_path, "-o", output_path])
 
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "no content left after background removal" in captured.err
+    assert "left unchanged" in captured.err

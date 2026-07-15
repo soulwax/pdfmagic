@@ -42,8 +42,8 @@ def main(argv: list | None = None) -> int:
     if args.audit:
         print(f"pdfbetter: audit report at {result.audit_report_path}")
         print(f"pdfbetter: debug overlay at {result.audit_overlay_path}")
-    for page_number in result.blank_pages:
-        print(f"pdfbetter: warning: page {page_number} has no content left after background removal", file=sys.stderr)
+    for page_number in result.unimproved_pages:
+        print(f"pdfbetter: warning: page {page_number} left unchanged (background removal would have left it blank)", file=sys.stderr)
     if result.failed_pages:
         for page_number, message in result.failed_pages:
             print(f"pdfbetter: page {page_number} failed to process: {message}", file=sys.stderr)

@@ -48,7 +48,8 @@ def embedded_font_resource_name(synthetic_pdf_path):
 @pytest.fixture
 def background_only_pdf_path(tmp_path):
     """A page whose only content is a full-bleed background fill -- nothing
-    else -- so background-stripping should leave the page blank."""
+    else -- so the safety rule should leave it unchanged rather than
+    stripping it down to a blank page."""
     pdf_path = tmp_path / "background_only.pdf"
     c = canvas.Canvas(str(pdf_path), pagesize=(612, 792))
     c.setFillColorRGB(0.05, 0.05, 0.05)

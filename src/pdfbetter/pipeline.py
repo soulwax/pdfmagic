@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import pikepdf
 
 from pdfbetter.audit import write_debug_overlay, write_report
-from pdfbetter.classify import Classified, Thresholds, classify
+from pdfbetter.classify import Classified, Decision, Thresholds, classify
 from pdfbetter.edit import apply_edits
 from pdfbetter.walk import walk_page
 
@@ -13,7 +13,7 @@ class ProcessResult:
     output_path: str
     pages_processed: int
     failed_pages: list = field(default_factory=list)
-    blank_pages: list = field(default_factory=list)
+    unimproved_pages: list = field(default_factory=list)
     audit_report_path: str | None = None
     audit_overlay_path: str | None = None
 
@@ -27,12 +27,25 @@ def _image_xobject_names(page) -> set:
     }
 
 
-def _page_became_blank(classified: Classified, walk_result) -> bool:
+def _would_become_blank(classified: Classified, walk_result) -> bool:
     had_fill_or_image = bool(walk_result.fills or walk_result.images)
     kept_fills = [d for _, d in classified.fills if d.action != "drop"]
     kept_images = [d for _, d in classified.images if d.action != "drop"]
     now_empty = not kept_fills and not kept_images and not classified.strokes and not classified.text_shows
     return had_fill_or_image and now_empty
+
+
+def _keep_everything(classified: Classified) -> Classified:
+    reason = "kept: dropping would have left the page with no content"
+    fills = [
+        (op, Decision("keep", reason)) if d.action == "drop" else (op, d)
+        for op, d in classified.fills
+    ]
+    images = [
+        (op, Decision("keep", reason)) if d.action == "drop" else (op, d)
+        for op, d in classified.images
+    ]
+    return Classified(fills=fills, strokes=classified.strokes, images=images, text_shows=classified.text_shows)
 
 
 def process(
@@ -47,7 +60,7 @@ def process(
     pdf = pikepdf.open(input_path)
     classified_by_page: dict[int, Classified] = {}
     failed_pages = []
-    blank_pages = []
+    unimproved_pages = []
 
     for page_number, page in enumerate(pdf.pages):
         try:
@@ -59,10 +72,12 @@ def process(
             instructions = pikepdf.parse_content_stream(page)
             walk_result = walk_page(instructions, page_width, page_height, image_names)
             classified = classify(walk_result, page_width, page_height, thresholds)
-            classified_by_page[page_number] = classified
 
-            if _page_became_blank(classified, walk_result):
-                blank_pages.append(page_number)
+            if _would_become_blank(classified, walk_result):
+                classified = _keep_everything(classified)
+                unimproved_pages.append(page_number)
+
+            classified_by_page[page_number] = classified
 
             new_instructions, xobject_names_to_remove = apply_edits(instructions, classified)
             page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(new_instructions))
@@ -87,7 +102,7 @@ def process(
         output_path=output_path,
         pages_processed=len(pdf.pages),
         failed_pages=failed_pages,
-        blank_pages=blank_pages,
+        unimproved_pages=unimproved_pages,
         audit_report_path=report_path,
         audit_overlay_path=overlay_path,
     )

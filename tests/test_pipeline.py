@@ -70,17 +70,20 @@ def test_pipeline_respects_custom_thresholds(synthetic_pdf_path, tmp_path):
         assert len(page.rects) == 1
 
 
-def test_pipeline_flags_page_that_becomes_blank(background_only_pdf_path, tmp_path):
+def test_pipeline_leaves_page_unchanged_when_stripping_would_blank_it(background_only_pdf_path, tmp_path):
     output_path = str(tmp_path / "output.pdf")
     result = process(background_only_pdf_path, output_path)
 
-    assert result.blank_pages == [0]
+    assert result.unimproved_pages == [0]
     assert result.failed_pages == []
 
+    with pdfplumber.open(output_path) as pdf:
+        assert len(pdf.pages[0].rects) == 1
 
-def test_pipeline_does_not_flag_normal_page_as_blank(synthetic_pdf_path, tmp_path):
+
+def test_pipeline_does_not_flag_normal_page_as_unimproved(synthetic_pdf_path, tmp_path):
     output_path = str(tmp_path / "output.pdf")
     result = process(synthetic_pdf_path, output_path)
 
-    assert result.blank_pages == []
+    assert result.unimproved_pages == []
     assert result.failed_pages == []
