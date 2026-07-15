@@ -14,8 +14,6 @@ def apply_edits(instructions: list, classified: Classified) -> tuple[list, set]:
     for fill, decision in classified.fills:
         if decision.action == "drop":
             drop_ranges.append((fill.start, fill.end))
-        elif decision.action == "recolor":
-            wrap_ranges.append((fill.start, fill.end, fill.color.colorspace, "fill"))
 
     for stroke, decision in classified.strokes:
         if decision.action == "recolor":

@@ -87,3 +87,38 @@ def test_pipeline_does_not_flag_normal_page_as_unimproved(synthetic_pdf_path, tm
 
     assert result.unimproved_pages == []
     assert result.failed_pages == []
+
+
+def test_pipeline_does_not_corrupt_sibling_page_sharing_resources(tmp_path):
+    pdf = pikepdf.new()
+    img_stream = pdf.make_stream(b"\xff" * (100 * 100), {
+        "/Type": pikepdf.Name("/XObject"),
+        "/Subtype": pikepdf.Name("/Image"),
+        "/Width": 100,
+        "/Height": 100,
+        "/BitsPerComponent": 8,
+        "/ColorSpace": pikepdf.Name("/DeviceGray"),
+    })
+    shared_resources = pdf.make_indirect(pikepdf.Dictionary({
+        "/XObject": pikepdf.Dictionary({
+            "/BigBg": pdf.make_indirect(img_stream),
+        })
+    }))
+
+    page1 = pdf.add_blank_page(page_size=(100, 100))
+    page1.Resources = shared_resources
+    page1.Contents = pdf.make_stream(b"q 100 0 0 100 0 0 cm /BigBg Do Q 10 10 m 20 10 l s")
+
+    page2 = pdf.add_blank_page(page_size=(100, 100))
+    page2.Resources = shared_resources
+    page2.Contents = pdf.make_stream(b"10 10 m 20 10 l s")
+
+    input_path = str(tmp_path / "shared.pdf")
+    pdf.save(input_path)
+
+    output_path = str(tmp_path / "output.pdf")
+    process(input_path, output_path)
+
+    result_pdf = pikepdf.open(output_path)
+    assert "/BigBg" not in result_pdf.pages[0].Resources.get("/XObject", {})
+    assert "/BigBg" in result_pdf.pages[1].Resources.get("/XObject", {})

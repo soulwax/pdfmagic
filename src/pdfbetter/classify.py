@@ -34,13 +34,10 @@ def classify(
     fills = []
     for fill in walk_result.fills:
         wf, hf = coverage_fraction(fill.bbox, page_width, page_height)
-        lum = luminance(fill.color)
         if wf >= thresholds.background_coverage and hf >= thresholds.background_coverage:
             fills.append((fill, Decision("drop", f"fill covers {wf:.0%}x{hf:.0%} of page")))
-        elif lum >= thresholds.contrast_luminance:
-            fills.append((fill, Decision("recolor", f"fill luminance {lum:.2f} low-contrast on white")))
         else:
-            fills.append((fill, Decision("keep", "normal-contrast fill below background threshold")))
+            fills.append((fill, Decision("keep", "below background-coverage threshold")))
 
     images = []
     for image in walk_result.images:

@@ -81,10 +81,15 @@ def process(
 
             new_instructions, xobject_names_to_remove = apply_edits(instructions, classified)
             page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(new_instructions))
-            xobjects = page.Resources.get("/XObject", {})
-            for name in xobject_names_to_remove:
-                if name in xobjects:
-                    del page.Resources.XObject[name]
+            if xobject_names_to_remove:
+                xobjects = page.Resources.get("/XObject", {})
+                remaining = pikepdf.Dictionary()
+                for key, value in xobjects.items():
+                    if key not in xobject_names_to_remove and str(key) not in xobject_names_to_remove:
+                        remaining[key] = value
+                new_resources = pikepdf.Dictionary(page.Resources)
+                new_resources["/XObject"] = remaining
+                page.Resources = new_resources
         except Exception as exc:
             failed_pages.append((page_number, str(exc)))
 

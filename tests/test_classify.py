@@ -19,11 +19,11 @@ def test_classify_keeps_small_dark_fill():
     assert decision.action == "keep"
 
 
-def test_classify_recolors_small_low_contrast_fill():
+def test_classify_keeps_light_fill_without_recoloring():
     fill = FillOp(2, 3, BBox(0, 0, 40, 40), Color("rgb", (0.95, 0.95, 0.95)))
     result = classify(WalkResult(fills=[fill]), page_width=612, page_height=792)
     _, decision = result.fills[0]
-    assert decision.action == "recolor"
+    assert decision.action == "keep"
 
 
 def test_classify_respects_custom_background_threshold():
