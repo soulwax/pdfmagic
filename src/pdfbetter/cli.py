@@ -1,8 +1,18 @@
 import argparse
 import sys
+from pathlib import Path
 
 from pdfbetter.classify import Thresholds
 from pdfbetter.pipeline import process
+
+
+def _default_output_path(input_path: str) -> str:
+    input_stem = Path(input_path).stem
+    output_dir = Path("output")
+    if not output_dir.is_dir():
+        output_dir = Path.home() / "Documents" / "PDFBETTER OUTPUT"
+        output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir / f"{input_stem}_printerfriendly.pdf")
 
 
 def main(argv: list | None = None) -> int:
@@ -11,7 +21,13 @@ def main(argv: list | None = None) -> int:
         description="Strip ink-heavy backgrounds from a PDF, keeping content faithful.",
     )
     parser.add_argument("input", help="path to the source PDF")
-    parser.add_argument("-o", "--output", required=True, help="path to write the output PDF")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="path to write the output PDF (default: ./output/<name>_printerfriendly.pdf if "
+        "./output exists, else ~/Documents/PDFBETTER OUTPUT/<name>_printerfriendly.pdf)",
+    )
     parser.add_argument(
         "--bg-threshold",
         type=float,
@@ -31,9 +47,10 @@ def main(argv: list | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    output_path = args.output or _default_output_path(args.input)
     thresholds = Thresholds(background_coverage=args.bg_threshold, contrast_luminance=args.contrast_luminance)
     try:
-        result = process(args.input, args.output, thresholds=thresholds, audit=args.audit)
+        result = process(args.input, output_path, thresholds=thresholds, audit=args.audit)
     except Exception as exc:
         print(f"pdfbetter: failed to process {args.input}: {exc}", file=sys.stderr)
         return 1
