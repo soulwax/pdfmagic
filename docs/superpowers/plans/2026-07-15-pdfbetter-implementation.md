@@ -2097,3 +2097,187 @@ Expected: all tests pass
 git add src/pdfbetter/cli.py tests/test_cli.py
 git commit -m "Make -o optional: default to ./output, falling back to ~/Documents/PDFBETTER OUTPUT"
 ```
+
+---
+
+### Task 13: Fix two Important findings from the final whole-branch review
+
+**Why:** the final whole-branch review (after all 12 tasks) found two Important issues, both confirmed by hand-tracing/empirical testing, neither blocking the primary use case but both real correctness gaps for arbitrary PDFs:
+
+1. **Light fills recolored to solid black.** `classify.py`'s contrast rule currently applies to kept vector fills, not just text/strokes. A light-gray decorative box (e.g. a callout/sidebar panel) that survives background-dropping gets forced to solid black, which is more ink-heavy than the original — the opposite of the tool's purpose. The user decided: limit recolor to text and strokes only; fills are only ever dropped (background) or kept unchanged, never recolored.
+2. **`del page.Resources.XObject[name]` can mutate a Resources dictionary shared by other pages.** Real-world PDFs commonly share one `/Resources` object across multiple pages. Deleting an entry in place removes it for every page sharing that object, not just the one being processed — verified with a two-page pikepdf test where both pages shared one Resources object. The fix: build a page-scoped copy of the Resources/XObject dictionaries before removing anything, so the mutation never touches an object another page might still reference. Verified working (page 1's edit doesn't affect page 2 sharing the same original Resources object).
+
+**Files:**
+- Modify: `src/pdfbetter/classify.py`
+- Modify: `src/pdfbetter/edit.py`
+- Modify: `src/pdfbetter/pipeline.py`
+- Modify: `tests/test_classify.py`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: no interface changes — `Decision.action` for fills is now only ever `"drop"` or `"keep"` (never `"recolor"`), which is a behavior narrowing, not a type change.
+
+- [ ] **Step 1: Update the changing test in `tests/test_classify.py`**
+
+Replace `test_classify_recolors_small_low_contrast_fill` with:
+
+```python
+def test_classify_keeps_light_fill_without_recoloring():
+    fill = FillOp(2, 3, BBox(0, 0, 40, 40), Color("rgb", (0.95, 0.95, 0.95)))
+    result = classify(WalkResult(fills=[fill]), page_width=612, page_height=792)
+    _, decision = result.fills[0]
+    assert decision.action == "keep"
+```
+
+- [ ] **Step 2: Run the classify tests to verify the new one fails**
+
+Run: `uv run pytest tests/test_classify.py -v`
+Expected: FAIL — `test_classify_keeps_light_fill_without_recoloring` fails because `classify.py` still returns `"recolor"` for this fill under the current implementation.
+
+- [ ] **Step 3: Update `src/pdfbetter/classify.py`'s fill loop**
+
+Replace:
+
+```python
+    fills = []
+    for fill in walk_result.fills:
+        wf, hf = coverage_fraction(fill.bbox, page_width, page_height)
+        lum = luminance(fill.color)
+        if wf >= thresholds.background_coverage and hf >= thresholds.background_coverage:
+            fills.append((fill, Decision("drop", f"fill covers {wf:.0%}x{hf:.0%} of page")))
+        elif lum >= thresholds.contrast_luminance:
+            fills.append((fill, Decision("recolor", f"fill luminance {lum:.2f} low-contrast on white")))
+        else:
+            fills.append((fill, Decision("keep", "normal-contrast fill below background threshold")))
+```
+
+with:
+
+```python
+    fills = []
+    for fill in walk_result.fills:
+        wf, hf = coverage_fraction(fill.bbox, page_width, page_height)
+        if wf >= thresholds.background_coverage and hf >= thresholds.background_coverage:
+            fills.append((fill, Decision("drop", f"fill covers {wf:.0%}x{hf:.0%} of page")))
+        else:
+            fills.append((fill, Decision("keep", "below background-coverage threshold")))
+```
+
+- [ ] **Step 4: Run the classify tests to verify they pass**
+
+Run: `uv run pytest tests/test_classify.py -v`
+Expected: PASS (all tests in the file)
+
+- [ ] **Step 5: Remove the now-unreachable fill-recolor branch in `src/pdfbetter/edit.py`**
+
+Replace:
+
+```python
+    for fill, decision in classified.fills:
+        if decision.action == "drop":
+            drop_ranges.append((fill.start, fill.end))
+        elif decision.action == "recolor":
+            wrap_ranges.append((fill.start, fill.end, fill.color.colorspace, "fill"))
+```
+
+with:
+
+```python
+    for fill, decision in classified.fills:
+        if decision.action == "drop":
+            drop_ranges.append((fill.start, fill.end))
+```
+
+- [ ] **Step 6: Run the edit tests to verify nothing broke**
+
+Run: `uv run pytest tests/test_edit.py -v`
+Expected: PASS (all tests — none of them exercised the removed branch)
+
+- [ ] **Step 7: Fix the shared-Resources mutation risk in `src/pdfbetter/pipeline.py`**
+
+Replace:
+
+```python
+            new_instructions, xobject_names_to_remove = apply_edits(instructions, classified)
+            page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(new_instructions))
+            xobjects = page.Resources.get("/XObject", {})
+            for name in xobject_names_to_remove:
+                if name in xobjects:
+                    del page.Resources.XObject[name]
+```
+
+with:
+
+```python
+            new_instructions, xobject_names_to_remove = apply_edits(instructions, classified)
+            page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(new_instructions))
+            if xobject_names_to_remove:
+                xobjects = page.Resources.get("/XObject", {})
+                remaining = pikepdf.Dictionary({
+                    key: value
+                    for key, value in xobjects.items()
+                    if str(key) not in xobject_names_to_remove
+                })
+                new_resources = pikepdf.Dictionary(page.Resources)
+                new_resources["/XObject"] = remaining
+                page.Resources = new_resources
+```
+
+This replaces in-place deletion (which can mutate a `/Resources` dictionary object shared by other pages) with building a page-scoped copy: `pikepdf.Dictionary(page.Resources)` makes a shallow copy of the top-level Resources dict, and assigning a freshly-built `/XObject` sub-dictionary to it, then assigning the whole copy back to `page.Resources`, means this page gets its own private Resources object — any other page still referencing the original shared object is completely unaffected.
+
+- [ ] **Step 8: Write a test proving the shared-Resources fix**
+
+Add to `tests/test_pipeline.py`:
+
+```python
+def test_pipeline_does_not_corrupt_sibling_page_sharing_resources(tmp_path):
+    pdf = pikepdf.new()
+    shared_resources = pdf.make_indirect(pikepdf.Dictionary({
+        "/XObject": pikepdf.Dictionary({
+            "/BigBg": pdf.make_indirect(pikepdf.Dictionary({
+                "/Type": pikepdf.Name("/XObject"),
+                "/Subtype": pikepdf.Name("/Image"),
+                "/Width": 100,
+                "/Height": 100,
+                "/BitsPerComponent": 8,
+                "/ColorSpace": pikepdf.Name("/DeviceGray"),
+            })),
+        })
+    }))
+    shared_resources.XObject.BigBg.write(b"\xff" * (100 * 100))
+
+    page1 = pdf.add_blank_page(page_size=(100, 100))
+    page1.Resources = shared_resources
+    page1.Contents = pdf.make_stream(b"q 100 0 0 100 0 0 cm /BigBg Do Q")
+
+    page2 = pdf.add_blank_page(page_size=(100, 100))
+    page2.Resources = shared_resources
+    page2.Contents = pdf.make_stream(b"q 100 0 0 100 0 0 cm /BigBg Do Q")
+
+    input_path = str(tmp_path / "shared.pdf")
+    pdf.save(input_path)
+
+    output_path = str(tmp_path / "output.pdf")
+    process(input_path, output_path)
+
+    result_pdf = pikepdf.open(output_path)
+    assert "/BigBg" not in result_pdf.pages[0].Resources.get("/XObject", {})
+    assert "/BigBg" in result_pdf.pages[1].Resources.get("/XObject", {})
+```
+
+- [ ] **Step 9: Run the pipeline tests to verify the new one passes**
+
+Run: `uv run pytest tests/test_pipeline.py -v`
+Expected: PASS (all tests, including the new one)
+
+- [ ] **Step 10: Run the full test suite**
+
+Run: `uv run pytest -v`
+Expected: all tests pass
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/pdfbetter/classify.py src/pdfbetter/edit.py src/pdfbetter/pipeline.py tests/test_classify.py tests/test_pipeline.py
+git commit -m "Limit contrast-recolor to text/strokes; stop mutating possibly-shared page Resources"
+```
