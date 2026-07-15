@@ -1745,3 +1745,355 @@ docstring-level intent, not just the code.
 git add README.md
 git commit -m "Write README with usage, design pointers, and status/next-up checklist"
 ```
+
+---
+
+### Task 11: Never drop content that would leave a page blank
+
+**Why:** the manual smoke test against `input/DND5.5e.pdf` (a fully rasterized PDF — every page is one full-page image, zero text/vector operators) found that the classifier drops that one image on every page (it exceeds the 80% background-coverage threshold), leaving every page blank. The design spec's "scanned image-only pages" section anticipated and accepted this as a known limitation, but the user asked for a small safety rule instead: never drop a fill/image if doing so would leave the page with zero remaining content. Keep the content untouched on that page instead, and report it as "left unchanged" rather than producing a blank page.
+
+**Files:**
+- Modify: `src/pdfbetter/pipeline.py`
+- Modify: `src/pdfbetter/cli.py`
+- Modify: `tests/test_pipeline.py`
+- Modify: `tests/test_cli.py`
+- Modify: `tests/conftest.py` (docstring only)
+
+**Interfaces:**
+- Consumes: `pdfbetter.classify.{Classified, Decision}`.
+- Produces: `ProcessResult.unimproved_pages: list[int]` — replaces `ProcessResult.blank_pages` (renamed; the old field never actually reaches the caller with a truly-blank page anymore, since this task prevents that outcome). `pipeline._would_become_blank` and `pipeline._keep_everything` are new private helpers.
+
+This task **replaces** `blank_pages` with `unimproved_pages` everywhere it appears (`pipeline.py`, `cli.py`, and the tests) — it is a rename plus a behavior change, not an addition alongside the old field.
+
+- [ ] **Step 1: Update the failing/changing tests in `tests/test_pipeline.py`**
+
+Replace the two blank-page tests (currently `test_pipeline_flags_page_that_becomes_blank` and `test_pipeline_does_not_flag_normal_page_as_blank`) with:
+
+```python
+def test_pipeline_leaves_page_unchanged_when_stripping_would_blank_it(background_only_pdf_path, tmp_path):
+    output_path = str(tmp_path / "output.pdf")
+    result = process(background_only_pdf_path, output_path)
+
+    assert result.unimproved_pages == [0]
+    assert result.failed_pages == []
+
+    with pdfplumber.open(output_path) as pdf:
+        assert len(pdf.pages[0].rects) == 1
+
+
+def test_pipeline_does_not_flag_normal_page_as_unimproved(synthetic_pdf_path, tmp_path):
+    output_path = str(tmp_path / "output.pdf")
+    result = process(synthetic_pdf_path, output_path)
+
+    assert result.unimproved_pages == []
+    assert result.failed_pages == []
+```
+
+- [ ] **Step 2: Run the pipeline tests to verify the new ones fail**
+
+Run: `uv run pytest tests/test_pipeline.py -v`
+Expected: FAIL — `test_pipeline_leaves_page_unchanged_when_stripping_would_blank_it` fails because `ProcessResult` has no `unimproved_pages` attribute yet (`AttributeError`), and the background rect is currently dropped (0 rects, not 1) under the old behavior.
+
+- [ ] **Step 3: Update `src/pdfbetter/pipeline.py`**
+
+Replace the whole file with:
+
+```python
+from dataclasses import dataclass, field
+
+import pikepdf
+
+from pdfbetter.audit import write_debug_overlay, write_report
+from pdfbetter.classify import Classified, Decision, Thresholds, classify
+from pdfbetter.edit import apply_edits
+from pdfbetter.walk import walk_page
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    output_path: str
+    pages_processed: int
+    failed_pages: list = field(default_factory=list)
+    unimproved_pages: list = field(default_factory=list)
+    audit_report_path: str | None = None
+    audit_overlay_path: str | None = None
+
+
+def _image_xobject_names(page) -> set:
+    xobjects = page.Resources.get("/XObject", {})
+    return {
+        str(name)
+        for name, obj in xobjects.items()
+        if obj.get("/Subtype") == pikepdf.Name("/Image")
+    }
+
+
+def _would_become_blank(classified: Classified, walk_result) -> bool:
+    had_fill_or_image = bool(walk_result.fills or walk_result.images)
+    kept_fills = [d for _, d in classified.fills if d.action != "drop"]
+    kept_images = [d for _, d in classified.images if d.action != "drop"]
+    now_empty = not kept_fills and not kept_images and not classified.strokes and not classified.text_shows
+    return had_fill_or_image and now_empty
+
+
+def _keep_everything(classified: Classified) -> Classified:
+    reason = "kept: dropping would have left the page with no content"
+    fills = [
+        (op, Decision("keep", reason)) if d.action == "drop" else (op, d)
+        for op, d in classified.fills
+    ]
+    images = [
+        (op, Decision("keep", reason)) if d.action == "drop" else (op, d)
+        for op, d in classified.images
+    ]
+    return Classified(fills=fills, strokes=classified.strokes, images=images, text_shows=classified.text_shows)
+
+
+def process(
+    input_path: str,
+    output_path: str,
+    *,
+    thresholds: Thresholds = Thresholds(),
+    audit: bool = False,
+    audit_report_path: str | None = None,
+    audit_overlay_path: str | None = None,
+) -> ProcessResult:
+    pdf = pikepdf.open(input_path)
+    classified_by_page: dict[int, Classified] = {}
+    failed_pages = []
+    unimproved_pages = []
+
+    for page_number, page in enumerate(pdf.pages):
+        try:
+            mediabox = page.mediabox
+            page_width = float(mediabox[2]) - float(mediabox[0])
+            page_height = float(mediabox[3]) - float(mediabox[1])
+            image_names = _image_xobject_names(page)
+
+            instructions = pikepdf.parse_content_stream(page)
+            walk_result = walk_page(instructions, page_width, page_height, image_names)
+            classified = classify(walk_result, page_width, page_height, thresholds)
+
+            if _would_become_blank(classified, walk_result):
+                classified = _keep_everything(classified)
+                unimproved_pages.append(page_number)
+
+            classified_by_page[page_number] = classified
+
+            new_instructions, xobject_names_to_remove = apply_edits(instructions, classified)
+            page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(new_instructions))
+            xobjects = page.Resources.get("/XObject", {})
+            for name in xobject_names_to_remove:
+                if name in xobjects:
+                    del page.Resources.XObject[name]
+        except Exception as exc:
+            failed_pages.append((page_number, str(exc)))
+
+    pdf.save(output_path)
+
+    report_path = None
+    overlay_path = None
+    if audit:
+        report_path = audit_report_path or f"{output_path}.audit.json"
+        write_report(classified_by_page, report_path)
+        overlay_path = audit_overlay_path or f"{output_path}.debug.pdf"
+        write_debug_overlay(pdf, classified_by_page, overlay_path)
+
+    return ProcessResult(
+        output_path=output_path,
+        pages_processed=len(pdf.pages),
+        failed_pages=failed_pages,
+        unimproved_pages=unimproved_pages,
+        audit_report_path=report_path,
+        audit_overlay_path=overlay_path,
+    )
+```
+
+- [ ] **Step 4: Run the pipeline tests to verify they pass**
+
+Run: `uv run pytest tests/test_pipeline.py -v`
+Expected: PASS (all pipeline tests, including the 2 updated ones)
+
+- [ ] **Step 5: Update `tests/test_cli.py`**
+
+Replace `test_cli_warns_but_succeeds_on_blank_page` with:
+
+```python
+def test_cli_warns_but_succeeds_on_unimproved_page(background_only_pdf_path, tmp_path, capsys):
+    output_path = str(tmp_path / "output.pdf")
+    exit_code = main([background_only_pdf_path, "-o", output_path])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "left unchanged" in captured.err
+```
+
+- [ ] **Step 6: Update `src/pdfbetter/cli.py`**
+
+Replace this block:
+
+```python
+    for page_number in result.blank_pages:
+        print(f"pdfbetter: warning: page {page_number} has no content left after background removal", file=sys.stderr)
+```
+
+with:
+
+```python
+    for page_number in result.unimproved_pages:
+        print(f"pdfbetter: warning: page {page_number} left unchanged (background removal would have left it blank)", file=sys.stderr)
+```
+
+- [ ] **Step 7: Update the docstring in `tests/conftest.py`**
+
+Change the `background_only_pdf_path` fixture's docstring from:
+
+```python
+    """A page whose only content is a full-bleed background fill -- nothing
+    else -- so background-stripping should leave the page blank."""
+```
+
+to:
+
+```python
+    """A page whose only content is a full-bleed background fill -- nothing
+    else -- so the safety rule should leave it unchanged rather than
+    stripping it down to a blank page."""
+```
+
+- [ ] **Step 8: Run the full test suite**
+
+Run: `uv run pytest -v`
+Expected: all tests pass (same total count as before, since this renamed 2 tests and updated 1, not added new ones)
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/pdfbetter/pipeline.py src/pdfbetter/cli.py tests/test_pipeline.py tests/test_cli.py tests/conftest.py
+git commit -m "Never drop content that would leave a page blank; report as unimproved instead"
+```
+
+---
+
+### Task 12: Default output location when `-o` is omitted
+
+**Why:** the user asked for `-o`/`--output` to become optional: default to `./output` (relative to the current working directory) if that directory already exists; otherwise fall back to a `PDFBETTER OUTPUT` folder under the platform's Documents directory, creating it if needed. The output filename is derived from the input file's name.
+
+**Files:**
+- Modify: `src/pdfbetter/cli.py`
+- Modify: `tests/test_cli.py`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `cli._default_output_path(input_path: str) -> str` (new private helper). `main`'s `-o`/`--output` argument becomes optional; behavior when provided is unchanged.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/test_cli.py` (add `from pathlib import Path` to the top of the file alongside the existing `import os`):
+
+```python
+def test_cli_defaults_output_to_existing_output_dir(synthetic_pdf_path, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "output").mkdir()
+
+    exit_code = main([synthetic_pdf_path])
+
+    assert exit_code == 0
+    expected = tmp_path / "output" / f"{Path(synthetic_pdf_path).stem}_printerfriendly.pdf"
+    assert expected.exists()
+
+
+def test_cli_defaults_output_to_documents_folder_when_no_output_dir(synthetic_pdf_path, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    exit_code = main([synthetic_pdf_path])
+
+    assert exit_code == 0
+    expected = fake_home / "Documents" / "PDFBETTER OUTPUT" / f"{Path(synthetic_pdf_path).stem}_printerfriendly.pdf"
+    assert expected.exists()
+
+
+def test_cli_explicit_output_still_overrides_default(synthetic_pdf_path, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    explicit_path = str(tmp_path / "explicit.pdf")
+
+    exit_code = main([synthetic_pdf_path, "-o", explicit_path])
+
+    assert exit_code == 0
+    assert os.path.exists(explicit_path)
+    assert not (tmp_path / "output").exists()
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/test_cli.py -v`
+Expected: FAIL — the first two new tests fail because `-o` is currently required (`argparse` exits with an error/`SystemExit` when it's omitted); the third passes already (explicit `-o` already works) but run the file together to confirm the first two fail for the expected reason.
+
+- [ ] **Step 3: Update `src/pdfbetter/cli.py`**
+
+Add `from pathlib import Path` to the imports, add this new function before `main`:
+
+```python
+def _default_output_path(input_path: str) -> str:
+    input_stem = Path(input_path).stem
+    output_dir = Path("output")
+    if not output_dir.is_dir():
+        output_dir = Path.home() / "Documents" / "PDFBETTER OUTPUT"
+        output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir / f"{input_stem}_printerfriendly.pdf")
+```
+
+Change the `-o`/`--output` argument definition from:
+
+```python
+    parser.add_argument("-o", "--output", required=True, help="path to write the output PDF")
+```
+
+to:
+
+```python
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="path to write the output PDF (default: ./output/<name>_printerfriendly.pdf if "
+        "./output exists, else ~/Documents/PDFBETTER OUTPUT/<name>_printerfriendly.pdf)",
+    )
+```
+
+And change this line (right after `args = parser.parse_args(argv)`):
+
+```python
+    thresholds = Thresholds(background_coverage=args.bg_threshold, contrast_luminance=args.contrast_luminance)
+    try:
+        result = process(args.input, args.output, thresholds=thresholds, audit=args.audit)
+```
+
+to:
+
+```python
+    output_path = args.output or _default_output_path(args.input)
+    thresholds = Thresholds(background_coverage=args.bg_threshold, contrast_luminance=args.contrast_luminance)
+    try:
+        result = process(args.input, output_path, thresholds=thresholds, audit=args.audit)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_cli.py -v`
+Expected: PASS (all tests in the file, including the 3 new ones)
+
+- [ ] **Step 5: Run the full test suite**
+
+Run: `uv run pytest -v`
+Expected: all tests pass
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/pdfbetter/cli.py tests/test_cli.py
+git commit -m "Make -o optional: default to ./output, falling back to ~/Documents/PDFBETTER OUTPUT"
+```
