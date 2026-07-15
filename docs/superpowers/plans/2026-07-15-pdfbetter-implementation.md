@@ -275,6 +275,7 @@ Create `tests/test_color.py`:
 
 ```python
 import pikepdf
+import pytest
 
 from pdfbetter.color import Color, black_operator, color_from_operands, luminance
 
@@ -304,7 +305,7 @@ def test_color_from_operands_pattern_fill_returns_none():
 
 
 def test_luminance_white_rgb_is_one():
-    assert luminance(Color("rgb", (1.0, 1.0, 1.0))) == 1.0
+    assert luminance(Color("rgb", (1.0, 1.0, 1.0))) == pytest.approx(1.0)
 
 
 def test_luminance_black_gray_is_zero():
