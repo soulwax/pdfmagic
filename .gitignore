@@ -222,3 +222,6 @@ __marimo__/
 /input/**/*.pdf
 
 !/input/
+
+# Subagent-driven-development scratch workspace (task briefs, review packages, ledger)
+/.superpowers/
