@@ -225,3 +225,7 @@ __marimo__/
 
 # Subagent-driven-development scratch workspace (task briefs, review packages, ledger)
 /.superpowers/
+
+/output/**/*.pdf
+
+!/output/
