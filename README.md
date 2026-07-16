@@ -35,7 +35,8 @@ See `docs/superpowers/specs/2026-07-15-pdfbetter-design.md` for the full
 design (content-stream surgery via `pikepdf`: parse the page's operators,
 walk them tracking graphics state, classify each fill/image as
 background-or-not by page-coverage fraction, drop the background ones,
-recolor low-contrast kept ones in place, reassemble). The implementation
+recolor low-contrast kept text/strokes in place, reassemble -- kept fills
+are never recolored, only dropped or left as-is). The implementation
 plan with task-by-task status is
 `docs/superpowers/plans/2026-07-15-pdfbetter-implementation.md`.
 
