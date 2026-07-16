@@ -425,8 +425,13 @@ dependencies = [
 dev = [
     { name = "pdfplumber" },
     { name = "pillow" },
+    { name = "pypdfium2" },
     { name = "pytest" },
     { name = "reportlab" },
+]
+rasterize = [
+    { name = "pillow" },
+    { name = "pypdfium2" },
 ]
 
 [package.metadata]
@@ -434,10 +439,13 @@ requires-dist = [
     { name = "pdfplumber", marker = "extra == 'dev'", specifier = ">=0.11" },
     { name = "pikepdf", specifier = ">=9.0" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.0" },
+    { name = "pillow", marker = "extra == 'rasterize'", specifier = ">=10.0" },
+    { name = "pypdfium2", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "pypdfium2", marker = "extra == 'rasterize'", specifier = ">=4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "reportlab", marker = "extra == 'dev'", specifier = ">=4.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "rasterize"]
 
 [[package]]
 name = "pdfminer-six"

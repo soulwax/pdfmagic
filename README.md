@@ -29,6 +29,33 @@ from pdfbetter.pipeline import process
 process("input.pdf", "output.pdf")
 ```
 
+## Rasterize/upscale mode
+
+For PDFs with no text/vector layer to preserve (fully rasterized/scanned
+PDFs — one full-page image per page, the surgery mode's target case doesn't
+apply), a second mode renders each page to an image, optionally trims fixed
+margins, upscales it with
+[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (`realesrgan-ncnn-vulkan`,
+an external prerequisite you install yourself — `scoop install
+realesrgan-ncnn-vulkan` on Windows, the upstream project's own release
+archives on macOS/Linux), and reassembles the result into a new PDF.
+Requires the `rasterize` extra:
+
+```bash
+uv pip install -e ".[rasterize]"
+uv run pdfbetter input.pdf --mode rasterize
+uv run pdfbetter input.pdf --mode rasterize --render-dpi 150       # faster/smaller than the 300 default
+uv run pdfbetter input.pdf --mode rasterize --crop-x 20 --crop-y 40 # trim a 20pt/40pt scanner-bed border
+uv run pdfbetter input.pdf --mode rasterize --realesrgan-path /custom/path/to/realesrgan-ncnn-vulkan
+```
+
+Output pages are images (no selectable text) — this mode trades text
+selectability for the only real quality improvement available when there's
+no text layer to begin with. Default upscale factor is 2x (not
+realesrgan-x4plus's native 4x) — at the default 300 DPI render, that's
+~600 DPI-equivalent output, well above standard print quality without the
+impractical processing time/file size of a full 4x pass on a large book.
+
 ## How it works
 
 See `docs/superpowers/specs/2026-07-15-pdfbetter-design.md` for the full
@@ -52,6 +79,8 @@ plan with task-by-task status is
 - [x] CLI — `src/pdfbetter/cli.py`
 - [x] Manual smoke test against `input/DND5.5e.pdf` — found the file is fully rasterized (one full-page image per page, no text layer), which was dropping every page to blank; led directly to the Task 11 safety rule (never drop content that would leave a page blank)
 - [x] Fixed: dropping a background image no longer mutates `page.Resources.XObject` in place — real PDFs can share one Resources object across pages, so a page-scoped copy is built before removing anything (see `pipeline.py`)
+- [x] Rasterize/upscale mode (`--mode rasterize`) — `src/pdfbetter/rasterize.py`, `src/pdfbetter/crop.py`, `src/pdfbetter/upscale.py`, `src/pdfbetter/rasterize_upscale_pipeline.py`
+- [ ] Manual smoke test of `--mode rasterize` against `input/DND5.5e.pdf` at the full 300 DPI default (only tested at 96 DPI so far, for turnaround time) — confirm the default is actually practical on a 387-page file, or reconsider it
 - [ ] Decide whether combined fill+stroke operators (`B`/`B*`/`b`/`b*`) need independent stroke-recolor handling — currently they're only ever treated as fills (see `walk.py` note); revisit if real-world testing finds a case where this drops a border that should have stayed
 - [ ] `walk.py`'s CTM stack is saved/restored across `q`/`Q`, but the active fill/stroke color is not — a PDF that sets a light color inside a balanced `q ... Q` and relies on the outer color afterward could see a stale color used for later contrast decisions. Bounded to missed-recolor (never background-dropping or content loss); low real-world frequency. Fix would be to stack `(fill_color, stroke_color)` alongside the CTM in `walk_page`.
 - [ ] Consider a `--dry-run` mode that only writes the audit report/overlay, no output PDF, for faster iteration on threshold tuning against a large file

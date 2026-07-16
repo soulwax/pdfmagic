@@ -18,6 +18,11 @@ dev = [
     "reportlab>=4.0",
     "pillow>=10.0",
     "pdfplumber>=0.11",
+    "pypdfium2>=4.0",
+]
+rasterize = [
+    "pypdfium2>=4.0",
+    "pillow>=10.0",
 ]
 
 [build-system]
