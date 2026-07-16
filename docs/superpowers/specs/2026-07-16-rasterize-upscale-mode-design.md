@@ -39,6 +39,8 @@ existing one:
 ```text
 source.pdf ──rasterize──> page images (PNG, per-page, temp dir)
                               │
+                          ──crop── (trim fixed margins, in-place, optional)
+                              │
                           ──upscale── (one batch realesrgan-ncnn-vulkan call)
                               │
                           upscaled images (temp dir)
@@ -47,6 +49,31 @@ source.pdf ──rasterize──> page images (PNG, per-page, temp dir)
                               │
                             output.pdf
 ```
+
+This design was revised after reviewing the user's own prior, hand-built
+version of this exact workflow (`inspiration/cut.py`, `inspiration/upscale.py`
+— informative precedent, not treated as binding truth). Two concrete changes
+came from that review: a margin-cropping step exists in the validated prior
+workflow and was missing from the first draft of this spec entirely, and the
+prior workflow's validated upscale scale factor is `2`, not `4` (see
+Upscale below).
+
+### Crop
+
+`pdfbetter/crop.py` (new module) trims a fixed margin off each rendered page
+image before upscaling — the prior workflow used this to remove scanner-bed
+white borders so the upscaler doesn't spend resolution on blank margin and
+the final page is tightly cropped to content. Unlike the prior script (which
+hardcoded raw pixel counts tied to whatever DPI it happened to render at),
+margins are specified in **points** (1/72 inch — the same unit PDF page
+geometry already uses throughout `pdfbetter`), converted to pixels
+internally using the actual `--render-dpi` in effect, so a given margin
+means the same physical trim regardless of render resolution. Symmetric per
+axis (one horizontal margin trimmed from both left and right, one vertical
+margin trimmed from both top and bottom), matching the prior script's shape
+rather than four independent per-side values — real scanned-page borders are
+typically even. Default: no cropping (`0pt` both axes) — opt-in, since not
+every source PDF has a border to trim.
 
 ### Rasterize
 
@@ -69,13 +96,32 @@ work happens**, so a missing binary never wastes time rendering pages first.
 
 If found, it's invoked **once**, as a single batch subprocess call over the
 whole staged input directory (`-i <in_dir> -o <out_dir> -n realesrgan-x4plus
--s 4`), rather than once per page — this is both faster (one process
-startup/model load instead of hundreds) and matches how the tool is designed
-to be used. The model name is configurable via `--realesrgan-model` for
-users who want a different bundled model (e.g. the anime variant), but
-`realesrgan-x4plus` is the default and the one this feature was built around
-("optimised for text" in practice means: not the anime-tuned variants, which
-distort fine linework/text).
+-s 2 -t <tile> -j <threads> [-x]`), rather than once per page — this is both
+faster (one process startup/model load instead of hundreds) and matches how
+the tool is designed to be used. The model name is configurable via
+`--realesrgan-model` for users who want a different bundled model (e.g. the
+anime variant), but `realesrgan-x4plus` is the default and the one this
+feature was built around ("optimised for text" in practice means: not the
+anime-tuned variants, which distort fine linework/text) — this matches the
+prior workflow's own validated choice.
+
+**Scale factor is `2`, not `4`**, again matching the prior workflow — even
+though `realesrgan-x4plus` is a 4x-trained model, `-s 2` requests a lower
+output multiplier than the model's native scale (the binary still runs the
+model internally and downsamples to the requested output scale). With the
+default `--render-dpi 300`, effective output resolution is ~600 DPI —
+comfortably above standard print quality (300 DPI) without the impractical
+file size/processing time of a full 4x (~1200 DPI-equivalent) multiplier on
+a large multi-hundred-page book.
+
+Three more tuning flags are exposed, matching tunables the prior workflow
+already found necessary in practice: `--realesrgan-tile` (tile size passed
+as `-t`; `0` = auto, the default; raising it can reduce per-tile overhead on
+a GPU with enough VRAM headroom), `--realesrgan-threads` (load:proc:save
+thread counts passed as `-j`; default `1:2:2`), and `--realesrgan-tta`
+(passes `-x`, enabling test-time augmentation — marginally cleaner output at
+roughly 8x the processing time; off by default, since the prior workflow's
+own assessment was "usually not worth it for text").
 
 ### Reassemble
 
@@ -92,15 +138,20 @@ New flags on the existing `pdfbetter` command (not a new command):
 - `--mode {surgery,rasterize}` (default: `surgery`, today's unchanged
   behavior).
 - `--render-dpi` (default: `300`) — only meaningful in `rasterize` mode;
-  the pre-upscale render resolution. Since the default model is a 4x
-  upscaler, the effective final resolution is 4x this value (300 → ~1200
-  DPI-equivalent). This is a real speed/size/quality tradeoff — a 387-page
-  book at the default produces very large intermediate/output files and a
-  slow run; the flag exists precisely so it can be lowered (e.g. `150` or
-  `96`) per-file without changing the tool's default.
+  the pre-upscale render resolution. With the default scale of `2`, the
+  effective final resolution is 2x this value (300 → ~600 DPI-equivalent).
+  This is still a real speed/size/quality tradeoff on a large book; the
+  flag exists precisely so it can be lowered (e.g. `150` or `96`) per-file
+  without changing the tool's default.
+- `--crop-x` / `--crop-y` (default: `0` both — no cropping) — margin, in
+  points, trimmed from both left+right (`--crop-x`) and both top+bottom
+  (`--crop-y`) of every rendered page before upscaling.
 - `--realesrgan-path` (default: none, falls back to env var then PATH
   lookup as described above).
 - `--realesrgan-model` (default: `realesrgan-x4plus`).
+- `--realesrgan-tile` (default: `0`, auto).
+- `--realesrgan-threads` (default: `1:2:2`).
+- `--realesrgan-tta` (default: off).
 
 `--mode rasterize` is incompatible with `--bg-threshold`/
 `--contrast-luminance`/`--audit` (those are surgery-mode-only); passing them
@@ -142,10 +193,14 @@ external binary the user installs themselves, located at runtime.
   `reportlab`, already a dev dependency), asserting the expected number of
   PNG files are produced with roughly the expected pixel dimensions for a
   given DPI.
+- Unit tests for `crop.py`: points-to-pixels conversion at a given DPI, and
+  the crop itself against a synthetic image, including the "margins too
+  large for this image" error case.
 - Unit tests for `upscale.py` with the subprocess call mocked/stubbed (no
   dependency on the real binary or a GPU in CI) — asserting the correct
-  command-line arguments are constructed, and that binary-not-found /
-  subprocess-failure cases raise the expected clear errors.
+  command-line arguments are constructed (including `-t`/`-j`/`-x`), and
+  that binary-not-found / subprocess-failure cases raise the expected clear
+  errors.
 - Unit tests for the reassembly step building a PDF from a couple of
   synthetic PNGs and asserting page count/dimensions.
 - An end-to-end test that actually shells out to `realesrgan-ncnn-vulkan`
