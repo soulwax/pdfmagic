@@ -61,4 +61,4 @@ else {
     }
 }
 
-Write-Host "`nTo verify persistence, close and reopen your PowerShell terminal, then type:`n  Get-Command python.exe`"
+Write-Host "`nTo verify persistence, close and reopen your PowerShell terminal, then type:`n  Get-Command python.exe"
